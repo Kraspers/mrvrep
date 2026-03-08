@@ -68,7 +68,7 @@ function banReason(req) {
 function userViewServer(s) {
   return {
     id: s.id,
-    name: s.isPublicNamed ? s.name : '',
+    name: s.name || '',
     visibleName: !!s.isPublicNamed,
     avatar: s.avatar || '',
     deviceJoinPath: `/servers/${s.id}/${s.joinCode}`

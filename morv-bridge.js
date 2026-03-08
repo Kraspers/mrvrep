@@ -7,6 +7,7 @@
   let lastVersion = 0;
   let applying = false;
   let localDirty = false;
+  let pendingRemote = null;
   const _serverCodeMap = JSON.parse(localStorage.getItem('morv_server_codes')||'{}');
 
   function _saveServerCode(sid, code){
@@ -183,10 +184,14 @@
     try {
       const r = await api(`/api/servers/${activeServerId}/state`);
       _saveServerCode(activeServerId, _extractCode(r.server));
-      if ((r.version || 0) !== lastVersion && !localDirty) {
-        lastVersion = r.version || 0;
-        r.state = await decryptState(activeServerId, r.state);
-        applyStateFromServer(r);
+      if ((r.version || 0) !== lastVersion) {
+        if (localDirty) {
+          pendingRemote = r;
+        } else {
+          lastVersion = r.version || 0;
+          r.state = await decryptState(activeServerId, r.state);
+          applyStateFromServer(r);
+        }
       }
     } catch {}
   }
@@ -204,9 +209,17 @@
       });
       lastVersion = r.version || lastVersion;
       localDirty = false;
+      if (pendingRemote && (pendingRemote.version || 0) > lastVersion) {
+        const pr = pendingRemote;
+        pendingRemote = null;
+        pr.state = await decryptState(activeServerId, pr.state);
+        lastVersion = pr.version || lastVersion;
+        applyStateFromServer(pr);
+      }
     } catch (e) {
       if ((e.message||'').includes('state_conflict')) {
         localDirty = false;
+        pendingRemote = null;
         await pullState();
       }
     }

@@ -1891,22 +1891,12 @@ function bootWithAva(sid,snm,avaData){
 function boot(sid,snm){
   $.sid=sid; $.snm=snm;
   $.me={id:gid(12),name:rn(),emoji:EMOJIS[~~(Math.random()*EMOJIS.length)],you:true};
-  const [c1,c2,c3,c4]=[gid(),gid(),gid(),gid()];
-  $.cats=[{id:'g1',name:'ОБЩИЕ'},{id:'g2',name:'ГОЛОСОВЫЕ'}];
-  $.chs={
-    [c1]:{id:c1,name:'общий',type:'text',cat:'g1',desc:'Основной чат'},
-    [c2]:{id:c2,name:'оффтоп',type:'text',cat:'g1',desc:'Разговоры'},
-    [c3]:{id:c3,name:'лаунж',type:'voice',cat:'g2',desc:''},
-    [c4]:{id:c4,name:'работа',type:'voice',cat:'g2',desc:''},
-  };
-  $.msgs={[c1]:[],[c2]:[],[c3]:[],[c4]:[]};
-  $.unread={[c1]:0,[c2]:0,[c3]:0,[c4]:0};
-  $.pinned={[c1]:[],[c2]:[],[c3]:[],[c4]:[]};
-  $.members=[$.me,...Array.from({length:2+~~(Math.random()*4)},()=>({
-    id:gid(),name:rn(),emoji:EMOJIS[~~(Math.random()*EMOJIS.length)],you:false
-  }))];
-  sysMsg(c1,'👻 Пространство создано. Поделитесь ссылкой.');
-  sysMsg(c1,'🔒 Сквозное шифрование. Без данных.');
+  $.cats=[];
+  $.chs={};
+  $.msgs={};
+  $.unread={};
+  $.pinned={};
+  $.members=[$.me];
 
   const avaEl=document.getElementById('srvAva');
   if($.srvAva){
@@ -1916,7 +1906,7 @@ function boot(sid,snm){
   }
   document.getElementById('srvNm').textContent=snm;
   document.getElementById('srvId').textContent='ID: '+sid;
-  document.getElementById('invBox').textContent='phantom.app/s/'+sid;
+  document.getElementById('invBox').textContent='morv.app/s/'+sid;
 
   renderChs();
   document.getElementById('landing').style.display='none';
@@ -1931,10 +1921,9 @@ function boot(sid,snm){
     document.getElementById('sidebarName').textContent=$.me.name;
   }
 
-  if(window.innerWidth>=700) switchCh(c1);
-  else setView('ch');
-
-  sim();
+  const firstText=Object.values($.chs).find(ch=>ch.type==='text');
+  if(window.innerWidth>=700 && firstText) switchCh(firstText.id);
+  else { setView('ch'); setTb('morv',false,false); }
 }
 
 function sysMsg(cid,txt){
@@ -2382,16 +2371,6 @@ function send(){
     }, $.autoDelMs);
   }
   inp.value=''; inp.style.height=''; renderMsgs(); scrollDn();
-  const oth=$.members.filter(m=>!m.you);
-  if(oth.length&&Math.random()>.35&&!(ch&&ch.readonly)){
-    const r=oth[~~(Math.random()*oth.length)];
-    const rp=['ок','понял 👍','+','хм','интересно','согласен','...','🤔','ясно','точно'];
-    setTimeout(()=>{
-      if($.cur!==cid)return;
-      $.msgs[cid].push({id:gid(),aid:r.id,author:r.name,text:rp[~~(Math.random()*rp.length)],ts:Date.now(),reactions:{}});
-      if($.cur===cid){renderMsgs();scrollDnIfAtBottom();}
-    },900+Math.random()*2500);
-  }
 }
 function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}
 function grow(el){el.style.height='';el.style.height=Math.min(el.scrollHeight,100)+'px';}

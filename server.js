@@ -70,6 +70,7 @@ function userViewServer(s) {
     id: s.id,
     name: s.isPublicNamed ? s.name : '',
     visibleName: !!s.isPublicNamed,
+    avatar: s.avatar || '',
     deviceJoinPath: `/servers/${s.id}/${s.joinCode}`
   };
 }
@@ -148,8 +149,10 @@ const server = http.createServer(async (req, res) => {
     const body = await parseBody(req);
     const sid = uid('srv');
     const nm = (body.name || '').trim();
+    const avatar = typeof body.avatar === 'string' ? body.avatar : '';
     db.servers[sid] = newServer(sid, false, nm);
     db.servers[sid].state.snm = nm || sid;
+    db.servers[sid].avatar = avatar;
     db.servers[sid].members = [a.userId];
     save();
     return json(res, 200, { server: userViewServer(db.servers[sid]) });
@@ -191,8 +194,14 @@ const server = http.createServer(async (req, res) => {
     if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
     const body = await parseBody(req);
     if (!body || typeof body !== 'object' || !body.state) return json(res, 400, { error: 'bad_state' });
+    const expectedVersion = Number(body.expectedVersion || 0);
+    if (expectedVersion && expectedVersion !== s.stateVersion) {
+      return json(res, 409, { error: 'state_conflict', version: s.stateVersion });
+    }
     s.state = Object.assign(defaultState(sid, s.name || sid), body.state);
     s.state.sid = sid;
+    if (typeof body.serverName === 'string') s.name = body.serverName.trim();
+    if (typeof body.serverAvatar === 'string') s.avatar = body.serverAvatar;
     s.stateVersion += 1;
     save();
     return json(res, 200, { ok: true, version: s.stateVersion });

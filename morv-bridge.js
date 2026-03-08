@@ -6,6 +6,7 @@
   let pullTimer = null;
   let lastVersion = 0;
   let applying = false;
+  let localDirty = false;
   const _serverCodeMap = JSON.parse(localStorage.getItem('morv_server_codes')||'{}');
 
   function _saveServerCode(sid, code){
@@ -131,7 +132,8 @@
     const st = payload.state;
     applying = true;
     $.sid = st.sid || activeServerId;
-    $.snm = payload.server && payload.server.visibleName ? payload.server.name : (st.snm || $.sid);
+    $.snm = (payload.server && payload.server.name) ? payload.server.name : (st.snm || $.sid);
+    $.srvAva = (payload.server && payload.server.avatar) ? payload.server.avatar : (st.srvAva || null);
     $.me = { id: me.id, name: me.name, emoji: $.me?.emoji || '🦊', you: true };
 
     $.cats = Array.isArray(st.cats) ? st.cats : [];
@@ -159,7 +161,13 @@
     }
 
     const avaEl = document.getElementById('srvAva');
-    if (avaEl) avaEl.textContent = ($.snm || $.sid || 'M')[0].toUpperCase();
+    if (avaEl){
+      if ($.srvAva){
+        avaEl.innerHTML = `<img src="${$.srvAva}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`;
+      } else {
+        avaEl.textContent = ($.snm || $.sid || 'M')[0].toUpperCase();
+      }
+    }
     const srvNm = document.getElementById('srvNm');
     if (srvNm) srvNm.textContent = $.snm || $.sid;
     const srvId = document.getElementById('srvId');
@@ -175,7 +183,7 @@
     try {
       const r = await api(`/api/servers/${activeServerId}/state`);
       _saveServerCode(activeServerId, _extractCode(r.server));
-      if ((r.version || 0) !== lastVersion) {
+      if ((r.version || 0) !== lastVersion && !localDirty) {
         lastVersion = r.version || 0;
         r.state = await decryptState(activeServerId, r.state);
         applyStateFromServer(r);
@@ -184,18 +192,24 @@
   }
 
   function localStateSnapshot() {
-    return { sid: $.sid, snm: $.snm, cats: $.cats, chs: $.chs, msgs: $.msgs, unread: $.unread, pinned: $.pinned };
+    return { sid: $.sid, snm: $.snm, srvAva: $.srvAva || null, cats: $.cats, chs: $.chs, msgs: $.msgs, unread: $.unread, pinned: $.pinned };
   }
 
   async function pushState() {
-    if (!activeServerId || applying || !window.$ || !$.sid) return;
+    if (!activeServerId || applying || !window.$ || !$.sid || !localDirty) return;
     try {
       const encState = await encryptState(activeServerId, localStateSnapshot());
       const r = await api(`/api/servers/${activeServerId}/state`, {
-        method: 'PUT', body: JSON.stringify({ state: encState })
+        method: 'PUT', body: JSON.stringify({ state: encState, expectedVersion: lastVersion || 0, serverName: $.snm || '', serverAvatar: $.srvAva || '' })
       });
       lastVersion = r.version || lastVersion;
-    } catch {}
+      localDirty = false;
+    } catch (e) {
+      if ((e.message||'').includes('state_conflict')) {
+        localDirty = false;
+        await pullState();
+      }
+    }
   }
 
   function attachRealtimeHooks() {
@@ -204,6 +218,7 @@
       if (typeof fn !== 'function' || fn._rtWrapped) return;
       const wrapped = function (...args) {
         const out = fn.apply(this, args);
+        localDirty = true;
         setTimeout(pushState, 0);
         return out;
       };
@@ -231,6 +246,7 @@
     if (typeof boot === 'function') boot(serverId, serverId);
     setRoute(`/servers/${serverId}`);
     attachRealtimeHooks();
+    localDirty = false;
     await pullState();
 
     clearInterval(syncTimer);
@@ -257,7 +273,8 @@
       window.doCreateServer = async function () {
         try {
           const name=((document.getElementById('createSrvName')||{}).value||'').trim();
-          const r = await api('/api/servers', { method: 'POST', body: JSON.stringify({ name }) });
+          const avatar=(window._srvAvaData||'');
+          const r = await api('/api/servers', { method: 'POST', body: JSON.stringify({ name, avatar }) });
           closeSh('sh-create');
           _saveServerCode(r.server.id, _extractCode(r.server));
           await openServer(r.server.id);

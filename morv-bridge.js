@@ -223,7 +223,11 @@
         try {
           const r = await api('/api/servers/' + $.sid + '/invite', { method: 'POST' });
           document.getElementById('qrLink').textContent = r.inviteUrl;
-          if (typeof drawQR === 'function') drawQR(r.inviteUrl);
+          const canvas=document.getElementById('qrCanvas');
+          const ctx=canvas.getContext('2d');
+          const img=new Image();
+          img.onload=()=>{ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(img,0,0,canvas.width,canvas.height); };
+          img.src='https://api.qrserver.com/v1/create-qr-code/?size=220x220&data='+encodeURIComponent(r.inviteUrl);
           openSh('sh-qr');
         } catch { toast('Не удалось создать инвайт'); }
       };
@@ -267,11 +271,14 @@
         } catch { showInviteExpired(); return; }
       }
 
-      if (activeServerId) {
+      const isPlainEntry = location.pathname==='/' || location.pathname==='/login';
+      if (!isPlainEntry && activeServerId) {
         try { await openServer(activeServerId); return; } catch {}
       }
 
-      setRoute('/login');
+      if (isPlainEntry) {
+        setRoute('/login');
+      }
     });
   } else {
     document.addEventListener('DOMContentLoaded', () => {

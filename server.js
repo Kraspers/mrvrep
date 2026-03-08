@@ -74,6 +74,24 @@ function userViewServer(s) {
   };
 }
 
+
+function appendWelcomeBotMessage(serverObj, userObj) {
+  if (!serverObj || !serverObj.state || !userObj) return;
+  const ch = Object.values(serverObj.state.chs || {}).find((c) => c && c.type === 'text' && c.name === 'приветствие');
+  if (!ch) return;
+  const cid = ch.id;
+  serverObj.state.msgs = serverObj.state.msgs || {};
+  serverObj.state.msgs[cid] = serverObj.state.msgs[cid] || [];
+  serverObj.state.msgs[cid].push({
+    id: uid('msg'),
+    aid: 'bot-welcome',
+    author: 'приветствие_bot',
+    text: `👋 ${userObj.name} зашёл на сервер.`,
+    ts: now(),
+    reactions: {}
+  });
+}
+
 function baseUrl(req) {
   const protoRaw = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0].trim();
   const hostRaw = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
@@ -141,7 +159,11 @@ const server = http.createServer(async (req, res) => {
     const s = db.servers[sid];
     if (!s) return json(res, 404, { error: 'server_not_found' });
     if ((body.code || '').trim().toLowerCase() !== String(s.joinCode || '').toLowerCase()) return json(res, 403, { error: 'bad_code' });
-    if (!s.members.includes(a.userId)) s.members.push(a.userId);
+    if (!s.members.includes(a.userId)) {
+      s.members.push(a.userId);
+      appendWelcomeBotMessage(s, db.users[a.userId]);
+      s.stateVersion += 1;
+    }
     save();
     return json(res, 200, { serverId: s.id });
   }
@@ -191,7 +213,11 @@ const server = http.createServer(async (req, res) => {
     const token = url.pathname.split('/')[3];
     const s = Object.values(db.servers).find((x) => x.invites[token] && x.invites[token].expiresAt > now());
     if (!s) return json(res, 404, { error: 'invite_invalid' });
-    if (!s.members.includes(a.userId)) s.members.push(a.userId);
+    if (!s.members.includes(a.userId)) {
+      s.members.push(a.userId);
+      appendWelcomeBotMessage(s, db.users[a.userId]);
+      s.stateVersion += 1;
+    }
     save();
     return json(res, 200, { serverId: s.id });
   }

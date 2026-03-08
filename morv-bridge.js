@@ -7,6 +7,21 @@
   let lastVersion = 0;
   let applying = false;
 
+  function setRoute(path) {
+    try { history.replaceState({}, '', path); } catch {}
+  }
+
+  function showInviteExpired() {
+    setRoute('/invite-expired');
+    document.body.innerHTML = `<div style="min-height:100vh;background:#0c0c0e;color:#ececf4;display:flex;align-items:center;justify-content:center;font-family:Inter,sans-serif;padding:24px;">
+      <div style="max-width:420px;text-align:center;">
+        <div style="font-size:48px;margin-bottom:10px;">😔</div>
+        <div style="font-size:18px;font-weight:700;margin-bottom:8px;">Похоже этот инвайт уже не действителен</div>
+        <div style="font-size:13px;color:#7a7a94;">Попросите новую ссылку-приглашение.</div>
+      </div>
+    </div>`;
+  }
+
   async function api(path, opts = {}, retry = true) {
     const token = localStorage.getItem('morv_token');
     const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
@@ -69,11 +84,11 @@
     }));
     $.members = remoteMembers.length ? remoteMembers : [$.me];
 
+    const current = $.cur && $.chs[$.cur] ? $.cur : null;
     const firstText = Object.values($.chs).find((c) => c.type === 'text');
-    if (firstText) {
-      $.cur = firstText.id;
-      switchCh(firstText.id);
-    } else {
+    if (current) switchCh(current);
+    else if (firstText) switchCh(firstText.id);
+    else {
       renderChs();
       setView('ch');
       setTb('morv', false, false);
@@ -116,17 +131,45 @@
     } catch {}
   }
 
+  function attachRealtimeHooks() {
+    const wrap = (name) => {
+      const fn = window[name];
+      if (typeof fn !== 'function' || fn._rtWrapped) return;
+      const wrapped = function (...args) {
+        const out = fn.apply(this, args);
+        setTimeout(pushState, 0);
+        return out;
+      };
+      wrapped._rtWrapped = true;
+      window[name] = wrapped;
+    };
+    ['send', 'doMakeCat', 'doMakeCh', 'doEditCat', 'doEditCh', 'deleteCat', 'deleteCh', 'togglePin', 'togglePinCat', 'addBot', 'removeBot', 'doAnnounce'].forEach(wrap);
+
+    const origSwitch = window.switchCh;
+    if (typeof origSwitch === 'function' && !origSwitch._rtRouteWrapped) {
+      const w = function (...args) {
+        const r = origSwitch.apply(this, args);
+        if ($.sid && $.cur) setRoute(`/servers/${$.sid}/ch/${$.cur}`);
+        return r;
+      };
+      w._rtRouteWrapped = true;
+      window.switchCh = w;
+    }
+  }
+
   async function openServer(serverId) {
     saveActiveServer(serverId);
     if (typeof window.sim === 'function') window.sim = function () {};
 
     if (typeof boot === 'function') boot(serverId, serverId);
+    setRoute(`/servers/${serverId}`);
+    attachRealtimeHooks();
     await pullState();
 
     clearInterval(syncTimer);
     clearInterval(pullTimer);
-    syncTimer = setInterval(pushState, 2200);
-    pullTimer = setInterval(pullState, 1800);
+    syncTimer = setInterval(pushState, 900);
+    pullTimer = setInterval(pullState, 700);
   }
 
   if (!isAdmin) {
@@ -170,7 +213,10 @@
             return;
           }
           toast('Неверная ссылка или код');
-        } catch { toast('Не удалось войти на сервер'); }
+        } catch (e) {
+          if ((e.message || '').includes('invite_invalid')) showInviteExpired();
+          else toast('Не удалось войти на сервер');
+        }
       };
 
       window.showQR = async function () {
@@ -204,9 +250,9 @@
         try {
           const r = await api('/api/invites/' + inviteToken + '/join', { method: 'POST' });
           await openServer(r.serverId);
-          history.replaceState({}, '', '/');
+          setRoute(`/servers/${r.serverId}`);
           return;
-        } catch {}
+        } catch { showInviteExpired(); return; }
       }
 
       const pathJoin = location.pathname.match(/^\/servers\/([a-z0-9_]+)\/([a-z0-9]{8})$/i);
@@ -216,14 +262,16 @@
             method: 'POST', body: JSON.stringify({ code: pathJoin[2] })
           });
           await openServer(r.serverId);
-          history.replaceState({}, '', '/');
+          setRoute(`/servers/${r.serverId}`);
           return;
-        } catch {}
+        } catch { showInviteExpired(); return; }
       }
 
       if (activeServerId) {
         try { await openServer(activeServerId); return; } catch {}
       }
+
+      setRoute('/login');
     });
   } else {
     document.addEventListener('DOMContentLoaded', () => {
@@ -269,7 +317,7 @@
         } catch {}
       }
 
-      setInterval(loadServers, 5000);
+      setInterval(loadServers, 3000);
     });
   }
 })();

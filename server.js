@@ -65,8 +65,16 @@ function userViewServer(s) {
   return { id: s.id, name: s.isPublicNamed ? s.name : '', visibleName: !!s.isPublicNamed };
 }
 
+function baseUrl(req) {
+  const protoRaw = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0].trim();
+  const hostRaw = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+  const proto = protoRaw || (req.socket.encrypted ? 'https' : 'http');
+  return `${proto}://${hostRaw}`;
+}
+
+
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  const url = new URL(req.url, baseUrl(req));
 
   if (url.pathname === '/') return sendFile(res, path.join(__dirname, 'morv-full-release-2_0.html'));
   if (url.pathname === '/admmrv') return sendFile(res, path.join(__dirname, 'morv-admin.html'));
@@ -142,7 +150,7 @@ const server = http.createServer(async (req, res) => {
     const token = uid('inv');
     const expiresAt = now() + INVITE_TTL;
     s.invites = { [token]: { token, expiresAt } };
-    const inviteUrl = `http://${req.headers.host}/?invite=${token}`;
+    const inviteUrl = `${baseUrl(req)}/?invite=${token}`;
     save();
     return json(res, 200, { token, expiresAt, inviteUrl });
   }

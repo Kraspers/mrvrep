@@ -300,7 +300,8 @@
           const ctx=canvas.getContext('2d');
           const img=new Image();
           img.onload=()=>{ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(img,0,0,canvas.width,canvas.height); };
-          img.src='https://api.qrserver.com/v1/create-qr-code/?size=220x220&data='+encodeURIComponent(r.inviteUrl);
+          img.onerror=()=>{ if (typeof drawQR==='function') drawQR(r.inviteUrl); };
+          img.src=(r.qrUrl||('/api/qr?text='+encodeURIComponent(r.inviteUrl)))+'&_=' + Date.now();
           openSh('sh-qr');
         } catch { toast('Не удалось создать инвайт'); }
       };

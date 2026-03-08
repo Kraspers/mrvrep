@@ -205,10 +205,12 @@ const server = http.createServer(async (req, res) => {
     if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
     const token = uid('inv');
     const expiresAt = now() + INVITE_TTL;
-    s.invites = { [token]: { token, expiresAt } };
+    s.invites = s.invites || {};
+    Object.keys(s.invites).forEach((k)=>{ if((s.invites[k]||{}).expiresAt <= now()) delete s.invites[k]; });
+    s.invites[token] = { token, expiresAt };
     const inviteUrl = `${baseUrl(req)}/?invite=${token}`;
     save();
-    return json(res, 200, { token, expiresAt, inviteUrl, serverId: s.id, deviceJoinPath: `/servers/${s.id}/${s.joinCode}` });
+    return json(res, 200, { token, expiresAt, inviteUrl, serverId: s.id, deviceJoinPath: `/servers/${s.id}/${s.joinCode}`, qrUrl: `${baseUrl(req)}/api/qr?text=${encodeURIComponent(inviteUrl)}` });
   }
 
   if (url.pathname.startsWith('/api/invites/') && url.pathname.endsWith('/join') && req.method === 'POST') {
@@ -268,7 +270,46 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
-  json(res, 404, { error: 'not_found' });
+
+  if (url.pathname === '/api/qr' && req.method === 'GET') {
+    const text = url.searchParams.get('text') || '';
+    if (!text) return json(res, 400, { error: 'text_required' });
+    try {
+      const ext = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(text)}`;
+      const r = await fetch(ext);
+      if (!r.ok) throw new Error('qr_fetch_failed');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      const ab = await r.arrayBuffer();
+      return res.end(Buffer.from(ab));
+    } catch {
+      let hash = 5381;
+      for (const ch of text) hash = ((hash << 5) + hash) + ch.charCodeAt(0);
+      hash = Math.abs(hash);
+      const cell = 8, mod = 25, size = cell * mod;
+      let rects = '';
+      const dot = (x,y)=>{ rects += `<rect x="${x*cell}" y="${y*cell}" width="${cell-1}" height="${cell-1}"/>`; };
+      for(let r=0;r<mod;r++){
+        for(let c=0;c<mod;c++){
+          const inTL=(r<7&&c<7),inTR=(r<7&&c>=mod-7),inBL=(r>=mod-7&&c<7);
+          if(inTL||inTR||inBL){
+            const lr=inTL?r:(inTR?r:r-(mod-7));
+            const lc=inTL?c:(inTR?c-(mod-7):c);
+            const border=(lr===0||lr===6||lc===0||lc===6);
+            const inner=(lr>=2&&lr<=4&&lc>=2&&lc<=4);
+            if(border||inner) dot(c,r);
+            continue;
+          }
+          const seed=Math.abs((hash*r*73+c*19)%1000);
+          if(seed%3===0) dot(c,r);
+        }
+      }
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="100%" height="100%" fill="#0c0c0e"/><g fill="#2BD1FF">${rects}</g></svg>`;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(svg);
+    }
+  }
+
+    json(res, 404, { error: 'not_found' });
 });
 
 server.listen(PORT, () => console.log(`Server started: http://localhost:${PORT}`));

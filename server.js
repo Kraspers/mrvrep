@@ -145,8 +145,11 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/servers' && req.method === 'POST') {
     const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const body = await parseBody(req);
     const sid = uid('srv');
-    db.servers[sid] = newServer(sid, false, '');
+    const nm = (body.name || '').trim();
+    db.servers[sid] = newServer(sid, false, nm);
+    db.servers[sid].state.snm = nm || sid;
     db.servers[sid].members = [a.userId];
     save();
     return json(res, 200, { server: userViewServer(db.servers[sid]) });

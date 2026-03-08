@@ -6,6 +6,70 @@
   let pullTimer = null;
   let lastVersion = 0;
   let applying = false;
+  const _serverCodeMap = JSON.parse(localStorage.getItem('morv_server_codes')||'{}');
+
+  function _saveServerCode(sid, code){
+    if(!sid||!code) return;
+    _serverCodeMap[sid]=code;
+    localStorage.setItem('morv_server_codes', JSON.stringify(_serverCodeMap));
+  }
+
+  function _extractCode(obj){
+    const p = (obj && obj.deviceJoinPath) || '';
+    const m = p.match(/\/servers\/[^/]+\/([a-z0-9]{8})/i);
+    return m ? m[1] : '';
+  }
+
+  async function _deriveKey(serverId){
+    const code = _serverCodeMap[serverId] || '';
+    const enc = new TextEncoder();
+    const base = await crypto.subtle.importKey('raw', enc.encode('morv-e2e:'+serverId+':'+code), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode('morv-salt-'+serverId),iterations:120000,hash:'SHA-256'}, base, {name:'AES-GCM',length:256}, false, ['encrypt','decrypt']);
+  }
+
+  const _b64 = (buf)=>btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const _unb64 = (s)=>Uint8Array.from(atob(s), c=>c.charCodeAt(0));
+
+  async function _encryptText(serverId, text){
+    if(!text) return text;
+    if(String(text).startsWith('enc:v1:')) return text;
+    const key = await _deriveKey(serverId);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, new TextEncoder().encode(String(text)));
+    return 'enc:v1:'+_b64(iv)+':'+_b64(ct);
+  }
+
+  async function _decryptText(serverId, text){
+    if(!text || !String(text).startsWith('enc:v1:')) return text;
+    try{
+      const [, , ivB64, ctB64] = String(text).split(':');
+      const key = await _deriveKey(serverId);
+      const pt = await crypto.subtle.decrypt({name:'AES-GCM',iv:_unb64(ivB64)}, key, _unb64(ctB64));
+      return new TextDecoder().decode(pt);
+    }catch{ return '🔒 зашифровано'; }
+  }
+
+  async function encryptState(serverId, st){
+    const out = JSON.parse(JSON.stringify(st||{}));
+    const msgs = out.msgs || {};
+    for(const cid of Object.keys(msgs)){
+      for(const m of msgs[cid]||[]){
+        if(m && typeof m.text==='string' && !m.sys) m.text = await _encryptText(serverId, m.text);
+      }
+    }
+    return out;
+  }
+
+  async function decryptState(serverId, st){
+    const out = JSON.parse(JSON.stringify(st||{}));
+    const msgs = out.msgs || {};
+    for(const cid of Object.keys(msgs)){
+      for(const m of msgs[cid]||[]){
+        if(m && typeof m.text==='string' && !m.sys) m.text = await _decryptText(serverId, m.text);
+      }
+    }
+    return out;
+  }
 
   function setRoute(path) {
     try { history.replaceState({}, '', path); } catch {}
@@ -110,8 +174,10 @@
     if (!activeServerId || applying) return;
     try {
       const r = await api(`/api/servers/${activeServerId}/state`);
+      _saveServerCode(activeServerId, _extractCode(r.server));
       if ((r.version || 0) !== lastVersion) {
         lastVersion = r.version || 0;
+        r.state = await decryptState(activeServerId, r.state);
         applyStateFromServer(r);
       }
     } catch {}
@@ -124,8 +190,9 @@
   async function pushState() {
     if (!activeServerId || applying || !window.$ || !$.sid) return;
     try {
+      const encState = await encryptState(activeServerId, localStateSnapshot());
       const r = await api(`/api/servers/${activeServerId}/state`, {
-        method: 'PUT', body: JSON.stringify({ state: localStateSnapshot() })
+        method: 'PUT', body: JSON.stringify({ state: encState })
       });
       lastVersion = r.version || lastVersion;
     } catch {}
@@ -189,8 +256,10 @@
 
       window.doCreateServer = async function () {
         try {
-          const r = await api('/api/servers', { method: 'POST' });
+          const name=((document.getElementById('createSrvName')||{}).value||'').trim();
+          const r = await api('/api/servers', { method: 'POST', body: JSON.stringify({ name }) });
           closeSh('sh-create');
+          _saveServerCode(r.server.id, _extractCode(r.server));
           await openServer(r.server.id);
         } catch { toast('Не удалось создать сервер'); }
       };
@@ -202,6 +271,9 @@
         try {
           if (inviteMatch) {
             const r = await api('/api/invites/' + inviteMatch[1] + '/join', { method: 'POST' });
+            const sl = await api('/api/servers');
+            const srow = (sl.servers||[]).find(x=>x.id===r.serverId);
+            _saveServerCode(r.serverId, _extractCode(srow));
             await openServer(r.serverId);
             return;
           }
@@ -209,6 +281,7 @@
             const r = await api(`/api/servers/${codeMatch[1]}/join-code`, {
               method: 'POST', body: JSON.stringify({ code: codeMatch[2] })
             });
+            _saveServerCode(r.serverId, codeMatch[2]);
             await openServer(r.serverId);
             return;
           }
@@ -253,6 +326,9 @@
       if (inviteToken) {
         try {
           const r = await api('/api/invites/' + inviteToken + '/join', { method: 'POST' });
+          const sl = await api('/api/servers');
+          const srow = (sl.servers||[]).find(x=>x.id===r.serverId);
+          _saveServerCode(r.serverId, _extractCode(srow));
           await openServer(r.serverId);
           setRoute(`/servers/${r.serverId}`);
           return;
@@ -265,6 +341,7 @@
           const r = await api(`/api/servers/${pathJoin[1]}/join-code`, {
             method: 'POST', body: JSON.stringify({ code: pathJoin[2] })
           });
+          _saveServerCode(r.serverId, pathJoin[2]);
           await openServer(r.serverId);
           setRoute(`/servers/${r.serverId}`);
           return;

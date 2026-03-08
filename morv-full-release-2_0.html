@@ -1934,6 +1934,10 @@ function sysMsg(cid,txt){
 function renderChs(){
   const box=document.getElementById('chList');
   box.innerHTML='';
+  if(!$.cats.length){
+    box.innerHTML='<div style="padding:18px 16px;color:var(--t3);font-size:13px;">Создайте раздел.</div>';
+    return;
+  }
   $.cats.forEach(cat=>{
     const sec=document.createElement('div');
     sec.className='cat-sec';

@@ -39,7 +39,7 @@ function newServer(id, isPublicNamed = false, name = '') {
 function createData() {
   return {
     users: {}, sessions: {}, bannedIps: {}, bans: [],
-    servers: { FO: newServer('FO', true, 'FO'), FSC: newServer('FSC', true, 'FSC') }
+    servers: {}
   };
 }
 
@@ -109,8 +109,6 @@ const server = http.createServer(async (req, res) => {
       ips: [ip(req)]
     };
     db.sessions[token] = { userId, createdAt: now() };
-    if (!db.servers.FO.members.includes(userId)) db.servers.FO.members.push(userId);
-    if (!db.servers.FSC.members.includes(userId)) db.servers.FSC.members.push(userId);
     save();
     return json(res, 200, { token, user: db.users[userId] });
   }

@@ -224,11 +224,6 @@
       if (activeServerId) {
         try { await openServer(activeServerId); return; } catch {}
       }
-
-      try {
-        const list = await api('/api/servers');
-        if (list.servers && list.servers[0]) await openServer(list.servers[0].id);
-      } catch {}
     });
   } else {
     document.addEventListener('DOMContentLoaded', () => {

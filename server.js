@@ -13,16 +13,29 @@ const uid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
 const json = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
 const parseBody = (req) => new Promise((resolve) => {
   let buf = '';
-  req.on('data', (c) => { buf += c; if (buf.length > 1e6) req.destroy(); });
+  req.on('data', (c) => { buf += c; if (buf.length > 2e6) req.destroy(); });
   req.on('end', () => { try { resolve(JSON.parse(buf || '{}')); } catch { resolve({}); } });
 });
+const now = () => Date.now();
+
+function defaultState(serverId, serverName = '') {
+  return {
+    sid: serverId,
+    snm: serverName,
+    cats: [],
+    chs: {},
+    msgs: {},
+    unread: {},
+    pinned: {}
+  };
+}
 
 function createData() {
   return {
     users: {}, sessions: {}, bannedIps: {}, bans: [],
     servers: {
-      FO: { id: 'FO', name: 'FO', isPublicNamed: true, members: [], invites: {}, channels: {}, messages: {} },
-      FSC: { id: 'FSC', name: 'FSC', isPublicNamed: true, members: [], invites: {}, channels: {}, messages: {} }
+      FO: { id: 'FO', name: 'FO', isPublicNamed: true, members: [], invites: {}, state: defaultState('FO', 'FO'), stateVersion: 1 },
+      FSC: { id: 'FSC', name: 'FSC', isPublicNamed: true, members: [], invites: {}, state: defaultState('FSC', 'FSC'), stateVersion: 1 }
     }
   };
 }
@@ -43,6 +56,15 @@ function sendFile(res, file, ct = 'text/html; charset=utf-8') {
   fs.createReadStream(file).pipe(res);
 }
 
+function banReason(req) {
+  const addr = ip(req);
+  return db.bannedIps[addr] || db.bannedIps.all || '';
+}
+
+function userViewServer(s) {
+  return { id: s.id, name: s.isPublicNamed ? s.name : '', visibleName: !!s.isPublicNamed };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -52,60 +74,96 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/health') return json(res, 200, { ok: true });
 
   if (url.pathname === '/api/access' && req.method === 'GET') {
-    const reason = db.bannedIps[ip(req)];
+    const reason = banReason(req);
     return json(res, 200, reason ? { allowed: false, message: 'Доступ к Morv для вас был закрыт.', reason } : { allowed: true });
   }
 
   if (url.pathname === '/api/auth/login' && req.method === 'POST') {
-    const reason = db.bannedIps[ip(req)];
+    const reason = banReason(req);
     if (reason) return json(res, 403, { error: 'banned', reason });
     const body = await parseBody(req);
     const userId = uid('usr');
     const token = uid('sess');
-    db.users[userId] = { id: userId, name: (body.name || '').trim() || `user_${userId.slice(-4)}` };
-    db.sessions[token] = { userId, createdAt: Date.now() };
-    db.servers.FO.members.push(userId);
-    db.servers.FSC.members.push(userId);
+    db.users[userId] = { id: userId, name: (body.name || '').trim() || `user_${userId.slice(-4)}`, ips: [ip(req)] };
+    db.sessions[token] = { userId, createdAt: now() };
+    if (!db.servers.FO.members.includes(userId)) db.servers.FO.members.push(userId);
+    if (!db.servers.FSC.members.includes(userId)) db.servers.FSC.members.push(userId);
     save();
     return json(res, 200, { token, user: db.users[userId] });
+  }
+
+  if (url.pathname === '/api/me' && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const u = db.users[a.userId]; if (!u) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, { user: { id: u.id, name: u.name } });
+  }
+
+  if (url.pathname === '/api/servers' && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const servers = Object.values(db.servers).filter((s) => s.members.includes(a.userId)).map(userViewServer);
+    return json(res, 200, { servers });
   }
 
   if (url.pathname === '/api/servers' && req.method === 'POST') {
     const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
     const sid = uid('srv');
-    db.servers[sid] = { id: sid, name: '', isPublicNamed: false, members: [a.userId], invites: {}, channels: {}, messages: {} };
+    db.servers[sid] = { id: sid, name: '', isPublicNamed: false, members: [a.userId], invites: {}, state: defaultState(sid, sid), stateVersion: 1 };
     save();
-    return json(res, 200, { server: db.servers[sid] });
+    return json(res, 200, { server: userViewServer(db.servers[sid]) });
+  }
+
+  if (url.pathname.match(/^\/api\/servers\/[^/]+\/state$/) && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    return json(res, 200, { state: s.state, version: s.stateVersion, server: userViewServer(s), members: s.members.map((id) => db.users[id]).filter(Boolean).map((u) => ({ id: u.id, name: u.name })) });
+  }
+
+  if (url.pathname.match(/^\/api\/servers\/[^/]+\/state$/) && req.method === 'PUT') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    const body = await parseBody(req);
+    if (!body || typeof body !== 'object' || !body.state) return json(res, 400, { error: 'bad_state' });
+    s.state = Object.assign(defaultState(sid, s.name || sid), body.state);
+    s.state.sid = sid;
+    s.stateVersion += 1;
+    save();
+    return json(res, 200, { ok: true, version: s.stateVersion });
   }
 
   if (url.pathname.startsWith('/api/servers/') && url.pathname.endsWith('/invite') && req.method === 'POST') {
     const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
     const sid = url.pathname.split('/')[3];
-    const srv = db.servers[sid];
-    if (!srv || !srv.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
     const token = uid('inv');
-    const expiresAt = Date.now() + INVITE_TTL;
-    srv.invites = { [token]: { token, expiresAt } };
+    const expiresAt = now() + INVITE_TTL;
+    s.invites = { [token]: { token, expiresAt } };
     const inviteUrl = `http://${req.headers.host}/?invite=${token}`;
-    const qrDataUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(inviteUrl)}`;
     save();
-    return json(res, 200, { token, expiresAt, inviteUrl, qrDataUrl });
+    return json(res, 200, { token, expiresAt, inviteUrl });
   }
 
   if (url.pathname.startsWith('/api/invites/') && url.pathname.endsWith('/join') && req.method === 'POST') {
     const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
     const token = url.pathname.split('/')[3];
-    const srv = Object.values(db.servers).find((s) => s.invites[token] && s.invites[token].expiresAt > Date.now());
-    if (!srv) return json(res, 404, { error: 'invite_invalid' });
-    if (!srv.members.includes(a.userId)) srv.members.push(a.userId);
+    const s = Object.values(db.servers).find((x) => x.invites[token] && x.invites[token].expiresAt > now());
+    if (!s) return json(res, 404, { error: 'invite_invalid' });
+    if (!s.members.includes(a.userId)) s.members.push(a.userId);
     save();
-    return json(res, 200, { serverId: srv.id });
+    return json(res, 200, { serverId: s.id });
   }
 
   if (url.pathname === '/api/panic' && req.method === 'POST') {
     const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
     Object.keys(db.sessions).forEach((t) => { if (db.sessions[t].userId === a.userId) delete db.sessions[t]; });
-    Object.values(db.servers).forEach((s) => { s.members = s.members.filter((m) => m !== a.userId); });
+    Object.values(db.servers).forEach((s) => {
+      s.members = s.members.filter((m) => m !== a.userId);
+      if (s.state && s.state.members) s.state.members = (s.state.members || []).filter((m) => m.id !== a.userId);
+    });
     delete db.users[a.userId];
     save();
     return json(res, 200, { ok: true });
@@ -119,14 +177,24 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/admin/servers' && req.method === 'GET') {
     if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return json(res, 401, { error: 'unauthorized' });
-    return json(res, 200, { servers: Object.values(db.servers).map((s) => ({ id: s.id, name: s.name, members: s.members.length })) });
+    const servers = Object.values(db.servers).map((s) => ({ id: s.id, name: s.name, members: s.members.length }));
+    return json(res, 200, { servers });
   }
 
   if (url.pathname === '/api/admin/ban-server' && req.method === 'POST') {
     if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return json(res, 401, { error: 'unauthorized' });
     const body = await parseBody(req);
-    db.bannedIps[body.ip || 'all'] = body.reason || 'Заблокировано администратором';
-    db.bans.push({ serverId: body.serverId, reason: body.reason || '', at: Date.now(), ip: body.ip || 'all' });
+    const s = db.servers[body.serverId];
+    const reason = body.reason || 'Заблокировано администратором';
+    if (s) {
+      s.members.forEach((uid) => {
+        const u = db.users[uid];
+        (u?.ips || []).forEach((addr) => { db.bannedIps[addr] = reason; });
+        Object.keys(db.sessions).forEach((t) => { if (db.sessions[t].userId === uid) delete db.sessions[t]; });
+      });
+    }
+    if (body.ip) db.bannedIps[body.ip] = reason;
+    db.bans.push({ serverId: body.serverId, reason, at: now(), ip: body.ip || '' });
     save();
     return json(res, 200, { ok: true });
   }

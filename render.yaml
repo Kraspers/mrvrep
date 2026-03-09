@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: morv-app
+    runtime: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: MORV_ADMIN_PASSWORD
+        sync: false
+      - key: MORV_ADMIN_TOKEN
+        sync: false

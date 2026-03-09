@@ -1701,7 +1701,7 @@ html, body {
     </div>
   </div>
 </div>
-    <div class="privacy-badge-sub">Скриншот заблокирован.<br>Содержимое защищено.</div>
+    
   </div>
 </div>
 <script>
@@ -1891,22 +1891,12 @@ function bootWithAva(sid,snm,avaData){
 function boot(sid,snm){
   $.sid=sid; $.snm=snm;
   $.me={id:gid(12),name:rn(),emoji:EMOJIS[~~(Math.random()*EMOJIS.length)],you:true};
-  const [c1,c2,c3,c4]=[gid(),gid(),gid(),gid()];
-  $.cats=[{id:'g1',name:'ОБЩИЕ'},{id:'g2',name:'ГОЛОСОВЫЕ'}];
-  $.chs={
-    [c1]:{id:c1,name:'общий',type:'text',cat:'g1',desc:'Основной чат'},
-    [c2]:{id:c2,name:'оффтоп',type:'text',cat:'g1',desc:'Разговоры'},
-    [c3]:{id:c3,name:'лаунж',type:'voice',cat:'g2',desc:''},
-    [c4]:{id:c4,name:'работа',type:'voice',cat:'g2',desc:''},
-  };
-  $.msgs={[c1]:[],[c2]:[],[c3]:[],[c4]:[]};
-  $.unread={[c1]:0,[c2]:0,[c3]:0,[c4]:0};
-  $.pinned={[c1]:[],[c2]:[],[c3]:[],[c4]:[]};
-  $.members=[$.me,...Array.from({length:2+~~(Math.random()*4)},()=>({
-    id:gid(),name:rn(),emoji:EMOJIS[~~(Math.random()*EMOJIS.length)],you:false
-  }))];
-  sysMsg(c1,'👻 Пространство создано. Поделитесь ссылкой.');
-  sysMsg(c1,'🔒 Сквозное шифрование. Без данных.');
+  $.cats=[];
+  $.chs={};
+  $.msgs={};
+  $.unread={};
+  $.pinned={};
+  $.members=[$.me];
 
   const avaEl=document.getElementById('srvAva');
   if($.srvAva){
@@ -1916,7 +1906,7 @@ function boot(sid,snm){
   }
   document.getElementById('srvNm').textContent=snm;
   document.getElementById('srvId').textContent='ID: '+sid;
-  document.getElementById('invBox').textContent='phantom.app/s/'+sid;
+  document.getElementById('invBox').textContent='morv.app/s/'+sid;
 
   renderChs();
   document.getElementById('landing').style.display='none';
@@ -1931,10 +1921,9 @@ function boot(sid,snm){
     document.getElementById('sidebarName').textContent=$.me.name;
   }
 
-  if(window.innerWidth>=700) switchCh(c1);
-  else setView('ch');
-
-  sim();
+  const firstText=Object.values($.chs).find(ch=>ch.type==='text');
+  if(window.innerWidth>=700 && firstText) switchCh(firstText.id);
+  else { setView('ch'); setTb('morv',false,false); }
 }
 
 function sysMsg(cid,txt){
@@ -1945,6 +1934,10 @@ function sysMsg(cid,txt){
 function renderChs(){
   const box=document.getElementById('chList');
   box.innerHTML='';
+  if(!$.cats.length){
+    box.innerHTML='<div style="padding:18px 16px;color:var(--t3);font-size:13px;">Создайте раздел.</div>';
+    return;
+  }
   $.cats.forEach(cat=>{
     const sec=document.createElement('div');
     sec.className='cat-sec';
@@ -2004,7 +1997,9 @@ function switchCh(cid){
     renderVcGrid();
     setView('vc');
     setTb('🔊 '+ch.name,true,false);
+    _startVoiceCapture();
   } else {
+    _stopVoiceCapture();
     updatePinnedBanner(cid);
     renderMsgs(); scrollDn();
     setView('chat');
@@ -2331,6 +2326,7 @@ function send(){
   const inp=document.getElementById('chatInp');
   const txt=inp.value.trim(); if(!txt||!$.cur)return;
   const ch=$.chs[$.cur]; if(!ch||ch.type!=='text')return;
+  if(ch.readonly===true||ch.coreApp===true){ toast('В этот канал нельзя писать'); return; }
   const cid=$.cur;
   // Slow mode check
   if(!$.editMsgId&&!$.editSchedId&&window._ccSlowMode>0){
@@ -2382,16 +2378,6 @@ function send(){
     }, $.autoDelMs);
   }
   inp.value=''; inp.style.height=''; renderMsgs(); scrollDn();
-  const oth=$.members.filter(m=>!m.you);
-  if(oth.length&&Math.random()>.35&&!(ch&&ch.readonly)){
-    const r=oth[~~(Math.random()*oth.length)];
-    const rp=['ок','понял 👍','+','хм','интересно','согласен','...','🤔','ясно','точно'];
-    setTimeout(()=>{
-      if($.cur!==cid)return;
-      $.msgs[cid].push({id:gid(),aid:r.id,author:r.name,text:rp[~~(Math.random()*rp.length)],ts:Date.now(),reactions:{}});
-      if($.cur===cid){renderMsgs();scrollDnIfAtBottom();}
-    },900+Math.random()*2500);
-  }
 }
 function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}
 function grow(el){el.style.height='';el.style.height=Math.min(el.scrollHeight,100)+'px';}
@@ -2637,9 +2623,73 @@ function deleteMsg(mid){
 }
 
 // ── Voice ──
+window._vcStream=null;
+window._vcAnalyser=null;
+window._vcData=null;
+window._vcRAF=null;
+
+function vcToast(msg){
+  let el=document.getElementById('vcTopToast');
+  if(!el){
+    el=document.createElement('div');
+    el.id='vcTopToast';
+    el.style.cssText='position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:1200;background:rgba(19,19,22,.95);border:1px solid rgba(255,255,255,.12);color:var(--t);padding:8px 12px;border-radius:10px;font-size:12px;display:none;';
+    document.body.appendChild(el);
+  }
+  el.textContent=msg;
+  el.style.display='block';
+  clearTimeout(window._vcToastTimer);
+  window._vcToastTimer=setTimeout(()=>{el.style.display='none';},1400);
+}
+
+function _voiceTick(){
+  if(!window._vcAnalyser||!window._vcData){ return; }
+  window._vcAnalyser.getByteTimeDomainData(window._vcData);
+  let peak=0;
+  for(let i=0;i<window._vcData.length;i++){
+    const v=Math.abs(window._vcData[i]-128);
+    if(v>peak) peak=v;
+  }
+  const meCard=document.getElementById('vc-'+($.me&&$.me.id));
+  if(meCard) meCard.classList.toggle('sp', !$.vcMu && peak>10);
+  window._vcRAF=requestAnimationFrame(_voiceTick);
+}
+
+async function _startVoiceCapture(){
+  if(window._vcStream) return;
+  try{
+    const st=await navigator.mediaDevices.getUserMedia({audio:true});
+    window._vcStream=st;
+    const ac=window._vcCtx||(window._vcCtx=new (window.AudioContext||window.webkitAudioContext)());
+    const src=ac.createMediaStreamSource(st);
+    const an=ac.createAnalyser(); an.fftSize=512;
+    src.connect(an);
+    window._vcAnalyser=an;
+    window._vcData=new Uint8Array(an.fftSize);
+    if(window._vcRAF) cancelAnimationFrame(window._vcRAF);
+    window._vcRAF=requestAnimationFrame(_voiceTick);
+    vcToast('Микрофон подключен');
+  }catch(e){
+    vcToast('Нет доступа к микрофону');
+  }
+}
+
+function _stopVoiceCapture(){
+  if(window._vcRAF) cancelAnimationFrame(window._vcRAF);
+  window._vcRAF=null;
+  if(window._vcStream){
+    window._vcStream.getTracks().forEach(t=>t.stop());
+    window._vcStream=null;
+  }
+  window._vcAnalyser=null;
+  window._vcData=null;
+  const meCard=document.getElementById('vc-'+($.me&&$.me.id));
+  if(meCard) meCard.classList.remove('sp');
+}
+
 function renderVcGrid(){
   const g=document.getElementById('vcGrid'); g.innerHTML='';
-  const show=[$.me,...$.members.filter(m=>!m.you).slice(0,3)];
+  const show=[$.me,...$.members.filter(m=>!m.you).slice(0,6)];
   show.forEach(m=>{
     const c=document.createElement('div');
     c.className='vc-card'+(m.you?' me':'');
@@ -2647,13 +2697,6 @@ function renderVcGrid(){
     c.innerHTML=`<div class="vc-face">${m.emoji}</div><div class="vc-nm">${m.you?'вы':m.name}</div>`;
     g.appendChild(c);
   });
-  clearInterval(window._vi);
-  window._vi=setInterval(()=>{
-    show.filter(m=>!m.you).forEach(m=>{
-      const el=document.getElementById('vc-'+m.id);
-      if(el)el.classList.toggle('sp',Math.random()>.55);
-    });
-  },1800);
 }
 
 // ── Sounds ──
@@ -2698,8 +2741,9 @@ function toggleMic(){
     ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`
     : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
   b.classList.toggle('mu',$.vcMu);
+  if(window._vcStream){ window._vcStream.getAudioTracks().forEach(t=>t.enabled=!$.vcMu); }
   playSound($.vcMu?'mute':'unmute');
-  toast($.vcMu?'Микрофон выключен':'Микрофон включён');
+  vcToast($.vcMu?'Микрофон выключен':'Микрофон включён');
 }
 function toggleDeaf(){
   $.vcDf=!$.vcDf;
@@ -2709,13 +2753,13 @@ function toggleDeaf(){
     : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>`;
   b.classList.toggle('mu',$.vcDf);
   playSound($.vcDf?'mute':'unmute');
-  toast($.vcDf?'Звук выключен':'Звук включён');
+  vcToast($.vcDf?'Звук выключен':'Звук включён');
 }
 function leaveVc(){
-  clearInterval(window._vi);
+  _stopVoiceCapture();
   const ft=Object.values($.chs).find(c=>c.type==='text');
   if(ft)switchCh(ft.id); else{setView('ch');setTb('morv',false,false);}
-  toast('Голосовой канал покинут');
+  vcToast('Голосовой канал покинут');
 }
 
 // ── Members ──
@@ -4168,5 +4212,6 @@ function closeDesktopSettings(){
   <div class="core-app-body" id="coreAppBody"></div>
 </div>
 
+<script src="/morv-bridge.js"></script>
 </body>
 </html>

@@ -1,0 +1,324 @@
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PORT = Number(process.env.PORT || 3000);
+const DATA_FILE = path.join(__dirname, 'data.json');
+const ADMIN_PASSWORD = process.env.MORV_ADMIN_PASSWORD || 'mrvall106';
+const ADMIN_TOKEN = process.env.MORV_ADMIN_TOKEN || 'admin-token';
+const INVITE_TTL = 24 * 60 * 60 * 1000;
+
+const uid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
+const code8 = () => crypto.randomBytes(4).toString('hex');
+const json = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
+const parseBody = (req) => new Promise((resolve) => {
+  let buf = '';
+  req.on('data', (c) => { buf += c; if (buf.length > 2e6) req.destroy(); });
+  req.on('end', () => { try { resolve(JSON.parse(buf || '{}')); } catch { resolve({}); } });
+});
+const now = () => Date.now();
+
+function defaultState(serverId, serverName = '') {
+  return { sid: serverId, snm: serverName, cats: [], chs: {}, msgs: {}, unread: {}, pinned: {} };
+}
+
+function newServer(id, isPublicNamed = false, name = '') {
+  return {
+    id,
+    name,
+    isPublicNamed,
+    joinCode: code8(),
+    members: [],
+    invites: {},
+    state: defaultState(id, name || id),
+    stateVersion: 1
+  };
+}
+
+function createData() {
+  return {
+    users: {}, sessions: {}, bannedIps: {}, bans: [],
+    servers: {}
+  };
+}
+
+let db = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : createData();
+const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+const ip = (req) => (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+
+function auth(req) {
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (!token || !db.sessions[token]) return null;
+  return { token, userId: db.sessions[token].userId };
+}
+
+function sendFile(res, file, ct = 'text/html; charset=utf-8') {
+  if (!fs.existsSync(file)) return json(res, 404, { error: 'not_found' });
+  res.writeHead(200, { 'Content-Type': ct });
+  fs.createReadStream(file).pipe(res);
+}
+
+function banReason(req) {
+  const addr = ip(req);
+  return db.bannedIps[addr] || db.bannedIps.all || '';
+}
+
+function userViewServer(s) {
+  return {
+    id: s.id,
+    name: s.name || '',
+    visibleName: !!s.isPublicNamed,
+    avatar: s.avatar || '',
+    deviceJoinPath: `/servers/${s.id}/${s.joinCode}`
+  };
+}
+
+
+function appendWelcomeBotMessage(serverObj, userObj) {
+  if (!serverObj || !serverObj.state || !userObj) return;
+  const ch = Object.values(serverObj.state.chs || {}).find((c) => c && c.type === 'text' && c.name === 'приветствие');
+  if (!ch) return;
+  const cid = ch.id;
+  serverObj.state.msgs = serverObj.state.msgs || {};
+  serverObj.state.msgs[cid] = serverObj.state.msgs[cid] || [];
+  serverObj.state.msgs[cid].push({
+    id: uid('msg'),
+    aid: 'bot-welcome',
+    author: 'приветствие_bot',
+    text: `👋 ${userObj.name} зашёл на сервер.`,
+    ts: now(),
+    reactions: {}
+  });
+}
+
+function baseUrl(req) {
+  const protoRaw = (req.headers['x-forwarded-proto'] || '').toString().split(',')[0].trim();
+  const hostRaw = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+  const proto = protoRaw || (req.socket.encrypted ? 'https' : 'http');
+  return `${proto}://${hostRaw}`;
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, baseUrl(req));
+
+  if (['/', '/login'].includes(url.pathname) || url.pathname.startsWith('/servers/') || url.pathname.startsWith('/server/')) {
+    return sendFile(res, path.join(__dirname, 'morv-full-release-2_0.html'));
+  }
+  if (url.pathname === '/admmrv') return sendFile(res, path.join(__dirname, 'morv-admin.html'));
+  if (url.pathname === '/morv-bridge.js') return sendFile(res, path.join(__dirname, 'morv-bridge.js'), 'application/javascript; charset=utf-8');
+  if (url.pathname === '/health') return json(res, 200, { ok: true });
+
+  if (url.pathname === '/api/access' && req.method === 'GET') {
+    const reason = banReason(req);
+    return json(res, 200, reason ? { allowed: false, message: 'Доступ к Morv для вас был закрыт.', reason } : { allowed: true });
+  }
+
+  if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+    const reason = banReason(req);
+    if (reason) return json(res, 403, { error: 'banned', reason });
+    const body = await parseBody(req);
+    const userId = uid('usr');
+    const token = uid('sess');
+    db.users[userId] = {
+      id: userId,
+      name: (body.name || '').trim() || `user_${userId.slice(-4)}`,
+      deviceCode: body.deviceCode || code8(),
+      ips: [ip(req)]
+    };
+    db.sessions[token] = { userId, createdAt: now() };
+    save();
+    return json(res, 200, { token, user: db.users[userId] });
+  }
+
+  if (url.pathname === '/api/me' && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const u = db.users[a.userId]; if (!u) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, { user: { id: u.id, name: u.name, deviceCode: u.deviceCode } });
+  }
+
+  if (url.pathname === '/api/servers' && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const servers = Object.values(db.servers).filter((s) => s.members.includes(a.userId)).map(userViewServer);
+    return json(res, 200, { servers });
+  }
+
+  if (url.pathname === '/api/servers' && req.method === 'POST') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const body = await parseBody(req);
+    const sid = uid('srv');
+    const nm = (body.name || '').trim();
+    const avatar = typeof body.avatar === 'string' ? body.avatar : '';
+    db.servers[sid] = newServer(sid, false, nm);
+    db.servers[sid].state.snm = nm || sid;
+    db.servers[sid].avatar = avatar;
+    db.servers[sid].members = [a.userId];
+    save();
+    return json(res, 200, { server: userViewServer(db.servers[sid]) });
+  }
+
+  if (url.pathname.match(/^\/api\/servers\/[^/]+\/join-code$/) && req.method === 'POST') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const body = await parseBody(req);
+    const s = db.servers[sid];
+    if (!s) return json(res, 404, { error: 'server_not_found' });
+    if ((body.code || '').trim().toLowerCase() !== String(s.joinCode || '').toLowerCase()) return json(res, 403, { error: 'bad_code' });
+    if (!s.members.includes(a.userId)) {
+      s.members.push(a.userId);
+      appendWelcomeBotMessage(s, db.users[a.userId]);
+      s.stateVersion += 1;
+    }
+    save();
+    return json(res, 200, { serverId: s.id });
+  }
+
+  if (url.pathname.match(/^\/api\/servers\/[^/]+\/state$/) && req.method === 'GET') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    return json(res, 200, {
+      state: s.state,
+      version: s.stateVersion,
+      server: userViewServer(s),
+      members: s.members.map((id) => db.users[id]).filter(Boolean).map((u) => ({ id: u.id, name: u.name, deviceCode: u.deviceCode }))
+    });
+  }
+
+  if (url.pathname.match(/^\/api\/servers\/[^/]+\/state$/) && req.method === 'PUT') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    const body = await parseBody(req);
+    if (!body || typeof body !== 'object' || !body.state) return json(res, 400, { error: 'bad_state' });
+    const expectedVersion = Number(body.expectedVersion || 0);
+    if (expectedVersion && expectedVersion !== s.stateVersion) {
+      return json(res, 409, { error: 'state_conflict', version: s.stateVersion });
+    }
+    s.state = Object.assign(defaultState(sid, s.name || sid), body.state);
+    s.state.sid = sid;
+    if (typeof body.serverName === 'string') s.name = body.serverName.trim();
+    if (typeof body.serverAvatar === 'string') s.avatar = body.serverAvatar;
+    s.stateVersion += 1;
+    save();
+    return json(res, 200, { ok: true, version: s.stateVersion });
+  }
+
+  if (url.pathname.startsWith('/api/servers/') && url.pathname.endsWith('/invite') && req.method === 'POST') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const sid = url.pathname.split('/')[3];
+    const s = db.servers[sid];
+    if (!s || !s.members.includes(a.userId)) return json(res, 404, { error: 'server_not_found' });
+    const token = uid('inv');
+    const expiresAt = now() + INVITE_TTL;
+    s.invites = s.invites || {};
+    Object.keys(s.invites).forEach((k)=>{ if((s.invites[k]||{}).expiresAt <= now()) delete s.invites[k]; });
+    s.invites[token] = { token, expiresAt };
+    const inviteUrl = `${baseUrl(req)}/?invite=${token}`;
+    save();
+    return json(res, 200, { token, expiresAt, inviteUrl, serverId: s.id, deviceJoinPath: `/servers/${s.id}/${s.joinCode}`, qrUrl: `${baseUrl(req)}/api/qr?text=${encodeURIComponent(inviteUrl)}` });
+  }
+
+  if (url.pathname.startsWith('/api/invites/') && url.pathname.endsWith('/join') && req.method === 'POST') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    const token = url.pathname.split('/')[3];
+    const s = Object.values(db.servers).find((x) => x.invites[token] && x.invites[token].expiresAt > now());
+    if (!s) return json(res, 404, { error: 'invite_invalid' });
+    if (!s.members.includes(a.userId)) {
+      s.members.push(a.userId);
+      appendWelcomeBotMessage(s, db.users[a.userId]);
+      s.stateVersion += 1;
+    }
+    save();
+    return json(res, 200, { serverId: s.id });
+  }
+
+  if (url.pathname === '/api/panic' && req.method === 'POST') {
+    const a = auth(req); if (!a) return json(res, 401, { error: 'unauthorized' });
+    Object.keys(db.sessions).forEach((t) => { if (db.sessions[t].userId === a.userId) delete db.sessions[t]; });
+    Object.values(db.servers).forEach((s) => {
+      s.members = s.members.filter((m) => m !== a.userId);
+      if (s.state && s.state.members) s.state.members = (s.state.members || []).filter((m) => m.id !== a.userId);
+    });
+    delete db.users[a.userId];
+    save();
+    return json(res, 200, { ok: true });
+  }
+
+  if (url.pathname === '/api/admin/login' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const pass = body.password || '';
+    if (pass !== ADMIN_PASSWORD && pass !== 'mrvall106') return json(res, 401, { error: 'bad_password' });
+    return json(res, 200, { token: ADMIN_TOKEN });
+  }
+
+  if (url.pathname === '/api/admin/servers' && req.method === 'GET') {
+    if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return json(res, 401, { error: 'unauthorized' });
+    const servers = Object.values(db.servers).map((s) => ({ id: s.id, name: s.name, members: s.members.length, joinCode: s.joinCode }));
+    return json(res, 200, { servers });
+  }
+
+  if (url.pathname === '/api/admin/ban-server' && req.method === 'POST') {
+    if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return json(res, 401, { error: 'unauthorized' });
+    const body = await parseBody(req);
+    const s = db.servers[body.serverId];
+    const reason = body.reason || 'Заблокировано администратором';
+    if (s) {
+      s.members.forEach((uid) => {
+        const u = db.users[uid];
+        (u?.ips || []).forEach((addr) => { db.bannedIps[addr] = reason; });
+        Object.keys(db.sessions).forEach((t) => { if (db.sessions[t].userId === uid) delete db.sessions[t]; });
+      });
+    }
+    if (body.ip) db.bannedIps[body.ip] = reason;
+    db.bans.push({ serverId: body.serverId, reason, at: now(), ip: body.ip || '' });
+    save();
+    return json(res, 200, { ok: true });
+  }
+
+
+  if (url.pathname === '/api/qr' && req.method === 'GET') {
+    const text = url.searchParams.get('text') || '';
+    if (!text) return json(res, 400, { error: 'text_required' });
+    try {
+      const ext = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(text)}`;
+      const r = await fetch(ext);
+      if (!r.ok) throw new Error('qr_fetch_failed');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      const ab = await r.arrayBuffer();
+      return res.end(Buffer.from(ab));
+    } catch {
+      let hash = 5381;
+      for (const ch of text) hash = ((hash << 5) + hash) + ch.charCodeAt(0);
+      hash = Math.abs(hash);
+      const cell = 8, mod = 25, size = cell * mod;
+      let rects = '';
+      const dot = (x,y)=>{ rects += `<rect x="${x*cell}" y="${y*cell}" width="${cell-1}" height="${cell-1}"/>`; };
+      for(let r=0;r<mod;r++){
+        for(let c=0;c<mod;c++){
+          const inTL=(r<7&&c<7),inTR=(r<7&&c>=mod-7),inBL=(r>=mod-7&&c<7);
+          if(inTL||inTR||inBL){
+            const lr=inTL?r:(inTR?r:r-(mod-7));
+            const lc=inTL?c:(inTR?c-(mod-7):c);
+            const border=(lr===0||lr===6||lc===0||lc===6);
+            const inner=(lr>=2&&lr<=4&&lc>=2&&lc<=4);
+            if(border||inner) dot(c,r);
+            continue;
+          }
+          const seed=Math.abs((hash*r*73+c*19)%1000);
+          if(seed%3===0) dot(c,r);
+        }
+      }
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="100%" height="100%" fill="#0c0c0e"/><g fill="#2BD1FF">${rects}</g></svg>`;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(svg);
+    }
+  }
+
+    json(res, 404, { error: 'not_found' });
+});
+
+server.listen(PORT, () => console.log(`Server started: http://localhost:${PORT}`));
